@@ -1,0 +1,31 @@
+version = 1
+
+[[feeds]]
+title = "Hacker News"
+url = "https://news.ycombinator.com/rss"
+tags = ["news"]
+enabled = true
+
+[[feeds]]
+title = "海狸大師部落格"
+url = "https://blog.yenslife.top/index.xml"
+tags = ["blog"]
+enabled = true
+
+[[feeds]]
+title = "Reading Outpost"
+url = "https://readingoutpost.com/comments/feed/"
+tags = ["blog"]
+enabled = true
+
+[[feeds]]
+title = "The News Lens"
+url = "https://feeds.feedburner.com/TheNewsLens"
+tags = ["news"]
+enabled = true
+
+[[feeds]]
+title = "報導者"
+url = "https://public.twreporter.org/rss/twreporter-rss.xml"
+tags = ["news"]
+enabled = true
