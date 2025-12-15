@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import os
+import threading
 
 import flet as ft
 
@@ -27,12 +28,13 @@ def run_app() -> None:
 
 
 def _app(page: ft.Page) -> None:
-    page.title = "yenslife-rss-feed"
+    page.title = "flet-rss-feed"
     page.window_width = 1280
     page.window_height = 800
-    page.window_min_width = 1150
-    page.window_min_height = 700
+    page.window_min_width = 380
+    page.window_min_height = 640
     page.theme_mode = ft.ThemeMode.SYSTEM
+    page.adaptive = True
 
     outline_color = getattr(ft.Colors, "OUTLINE_VARIANT", ft.Colors.OUTLINE)
 
@@ -115,7 +117,7 @@ def _app(page: ft.Page) -> None:
         value=current_query,
         hint_text="搜尋（標題/連結/時間）",
         dense=True,
-        width=280,
+        expand=True,
         on_change=on_query_change,
     )
 
@@ -133,8 +135,8 @@ def _app(page: ft.Page) -> None:
 
             item_list.controls.append(
                 ft.ListTile(
-                    title=ft.Text(it.title),
-                    subtitle=ft.Text(subtitle, size=12),
+                    title=ft.Text(it.title, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                    subtitle=ft.Text(subtitle, size=12, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                     on_click=open_link,
                 )
             )
@@ -150,7 +152,7 @@ def _app(page: ft.Page) -> None:
                 )
             )
         elif not all_items:
-            item_list.controls.append(ft.Text("No items."))
+            item_list.controls.append(ft.Text("目前沒有文章。"))
 
         page.update()
 
@@ -175,10 +177,10 @@ def _app(page: ft.Page) -> None:
             items = cache.read_items(selected_feed)
             items = apply_sort_and_filter(items)
             all_items = items
-            status.value = f"Loaded cached items: {min(display_limit, len(items))}/{len(items)}. ({_now_text()})"
+            status.value = f"已讀取快取文章：{min(display_limit, len(items))}/{len(items)} 篇。 ({_now_text()})"
         except Exception as e:
             all_items = []
-            status.value = f"Failed to load cached items: {e}"
+            status.value = f"讀取快取失敗：{e}"
 
         render_items_with_pagination()
 
@@ -189,91 +191,175 @@ def _app(page: ft.Page) -> None:
         try:
             current_text, src_label = read_feed_toml_text(src)
         except Exception as e:
-            current_text = ""
-            src_label = src
-
-            dlg = ft.AlertDialog(
-                modal=True,
-                title=ft.Text("Edit feed.toml"),
-                content=ft.Text(f"Failed to read feed source: {e}"),
-                actions=[ft.TextButton("OK", on_click=lambda ev: page.close(dlg))],
+            page.open(
+                ft.AlertDialog(
+                    title=ft.Text("錯誤"),
+                    content=ft.Text(f"讀取訂閱來源失敗：{e}"),
+                )
             )
-            page.open(dlg)
             return
 
+        # Components
         editor = ft.TextField(
             value=current_text,
             multiline=True,
-            min_lines=20,
-            max_lines=30,
+            min_lines=5,  # Allows it to shrink if needed
+            expand=True,
+            text_style=ft.TextStyle(font_family="monospace", size=13),
+            bgcolor=getattr(ft.Colors, "SURFACE_VARIANT", ft.Colors.SURFACE),
+            border_width=0,
+            border_radius=8,
+            content_padding=15,
+        )
+
+        error_text = ft.Text(value="", size=12)
+        info_text = ft.Text(
+            value=f"{src_label}" + (" (唯讀)" if remote else ""),
+            size=12,
+            color=ft.Colors.OUTLINE,
+            overflow=ft.TextOverflow.ELLIPSIS,
             expand=True,
         )
-        error_text = ft.Text(value="", color=ft.Colors.RED)
-        info_text = ft.Text(value=f"Source: {src_label}", size=12)
 
-        def do_validate(_: ft.ControlEvent) -> None:
+        def close_overlay(_=None):
+            if modal_container in page.overlay:
+                page.overlay.remove(modal_container)
+            if update_layout in resize_subscriptions:
+                resize_subscriptions.remove(update_layout)
+            page.update()
+
+        def do_validate(_):
             try:
                 validate_feed_toml_text(editor.value or "")
-                error_text.value = "OK"
+                error_text.value = "設定驗證成功。"
                 error_text.color = ft.Colors.GREEN
             except Exception as e:
                 error_text.value = str(e)
                 error_text.color = ft.Colors.RED
             page.update()
 
-        def do_save(_: ft.ControlEvent) -> None:
+        def do_save(_):
             if remote:
-                error_text.value = "Remote FEED_TOML is not writable."
-                error_text.color = ft.Colors.RED
-                page.update()
                 return
-
             try:
                 saved_path = save_feed_toml_text(editor.value or "", src)
-                error_text.value = f"Saved: {os.path.abspath(saved_path)}"
+                error_text.value = f"已儲存：{os.path.abspath(saved_path)}"
                 error_text.color = ft.Colors.GREEN
                 page.update()
-                page.close(dlg)
+                
+                # Close after short delay or immediately? Let's close immediately for responsiveness
+                # But user might want to see success message. Let's just reload data.
                 load_subscriptions()
                 show_cached_articles()
+                close_overlay()
             except Exception as e:
                 error_text.value = str(e)
                 error_text.color = ft.Colors.RED
                 page.update()
 
-        actions = [
-            ft.TextButton("Validate", on_click=do_validate),
-            ft.TextButton("Cancel", on_click=lambda ev: page.close(dlg)),
-        ]
-        if not remote:
-            actions.insert(1, ft.ElevatedButton("Save", on_click=do_save))
-
-        if remote:
-            info_text.value = f"Source: {src_label} (read-only)"
-
-        dlg = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Edit feed.toml"),
-            content=ft.Column(
-                controls=[
-                    info_text,
-                    editor,
-                    error_text,
-                ],
-                tight=True,
-                width=800,
-                height=520,
-            ),
-            actions=actions,
-            actions_alignment=ft.MainAxisAlignment.END,
+        # Actions
+        actions_row = ft.Row(
+            controls=[
+                ft.TextButton("取消", on_click=close_overlay),
+                ft.OutlinedButton("驗證設定", on_click=do_validate),
+            ],
+            alignment=ft.MainAxisAlignment.END,
         )
-        page.open(dlg)
+        if not remote:
+            actions_row.controls.append(ft.FilledButton("儲存設定", on_click=do_save))
+
+        # Main Card Layout
+        card_content = ft.Column(
+            controls=[
+                # Header
+                ft.Row(
+                    [
+                        ft.Text("編輯訂閱來源 (feed.toml)", size=18, weight=ft.FontWeight.BOLD),
+                        ft.IconButton(ft.Icons.CLOSE, on_click=close_overlay),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                # Info Bar
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.DESCRIPTION, size=14, color=ft.Colors.OUTLINE),
+                        info_text,
+                    ],
+                    alignment=ft.MainAxisAlignment.START,
+                    spacing=5,
+                ),
+                # Editor Area (This expands to fill available space)
+                ft.Container(
+                    content=editor,
+                    expand=True,  # Critical for filling the middle space
+                    padding=ft.padding.symmetric(vertical=10),
+                ),
+                # Status & Footer
+                ft.Row(
+                    [
+                        ft.Container(content=error_text, expand=True),
+                    ]
+                ),
+                actions_row,
+            ],
+            expand=True, # Critical: The Column must fill the Container
+            spacing=5,
+        )
+
+        modal_card = ft.Container(
+            content=card_content,
+            bgcolor=ft.Colors.SURFACE,
+            padding=20,
+            border_radius=12,
+            shadow=ft.BoxShadow(
+                blur_radius=15, spread_radius=1, color=ft.Colors.with_opacity(0.5, ft.Colors.BLACK)
+            ),
+            # Size will be set by update_layout
+        )
+
+        # Backdrop
+        modal_container = ft.Container(
+            content=modal_card,
+            bgcolor=ft.Colors.with_opacity(0.5, ft.Colors.BLACK),
+            alignment=ft.alignment.center,
+            on_click=lambda e: None, # Consume clicks on backdrop if desired, or close_overlay to close on click outside
+            # We'll make only the backdrop clickable to close? 
+            # Actually, standard behavior is clicking backdrop closes.
+            # But let's keep it safe for code editing, require explicit cancel.
+            expand=True,
+        )
+
+        # Responsive Layout Logic
+        def update_layout(_=None):
+            w = page.width or 800
+            h = page.height or 600
+            
+            if w < 768:
+                # Mobile: Full screen ish
+                card_w = w * 0.95
+                card_h = h * 0.90
+            else:
+                # Desktop: Large centered modal
+                card_w = min(900, w * 0.85)
+                card_h = min(700, h * 0.85)
+
+            modal_card.width = card_w
+            modal_card.height = card_h
+            if modal_card.page:
+                modal_card.update()
+
+        resize_subscriptions.append(update_layout)
+
+        # Show it
+        page.overlay.append(modal_container)
+        page.update()
+        update_layout() # Initial sizing
 
     def load_subscriptions() -> None:
         nonlocal feeds, selected_feed
         nonlocal display_limit
         progress.visible = True
-        status.value = f"Loading feed.toml... ({_now_text()})"
+        status.value = f"正在讀取 feed.toml 設定檔... ({_now_text()})"
         page.update()
 
         try:
@@ -281,11 +367,11 @@ def _app(page: ft.Page) -> None:
             if selected_feed is None and feeds:
                 selected_feed = feeds[0]
             display_limit = PAGE_SIZE
-            status.value = f"Loaded {len(feeds)} feeds. ({_now_text()})"
+            status.value = f"已載入 {len(feeds)} 個訂閱來源。 ({_now_text()})"
         except Exception as e:
             feeds = []
             selected_feed = None
-            status.value = f"Failed to load feed.toml: {e}"
+            status.value = f"讀取 feed.toml 失敗：{e}"
         finally:
             progress.visible = False
             render_feed_list()
@@ -296,7 +382,7 @@ def _app(page: ft.Page) -> None:
         feed_list.controls.clear()
 
         if not feeds:
-            feed_list.controls.append(ft.Text("No feeds found."))
+            feed_list.controls.append(ft.Text("未找到任何訂閱。"))
             return
 
         for f in feeds:
@@ -308,9 +394,12 @@ def _app(page: ft.Page) -> None:
             feed_list.controls.append(
                 ft.ListTile(
                     title=ft.Text(
-                        f.title, weight=ft.FontWeight.BOLD if is_selected else None
+                        f.title, 
+                        weight=ft.FontWeight.BOLD if is_selected else None,
+                        max_lines=1,
+                        overflow=ft.TextOverflow.ELLIPSIS
                     ),
-                    subtitle=ft.Text(f.url, size=12),
+                    subtitle=ft.Text(f.url, size=12, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                     on_click=on_click,
                     selected=is_selected,
                 )
@@ -320,6 +409,10 @@ def _app(page: ft.Page) -> None:
         nonlocal selected_feed
         nonlocal display_limit
         selected_feed = next((f for f in feeds if f.id == feed_id), None)
+        
+        if current_layout_mode == "mobile":
+            page.close(drawer)
+
         display_limit = PAGE_SIZE
         set_items([])
         render_feed_list()
@@ -332,80 +425,255 @@ def _app(page: ft.Page) -> None:
             return
 
         progress.visible = True
-        status.value = f"Fetching: {selected_feed.title}... ({_now_text()})"
+        status.value = f"正在更新：{selected_feed.title}... ({_now_text()})"
         page.update()
 
         try:
             items, msg = fetch_feed_items(cache, selected_feed)
             items = apply_sort_and_filter(items)
             set_items(items)
-            status.value = f"{msg} Items: {min(display_limit, len(items))}/{len(items)}. ({_now_text()})"
+            status.value = f"{msg} 目前顯示：{min(display_limit, len(items))}/{len(items)} 篇。 ({_now_text()})"
         except Exception as e:
-            status.value = f"Failed to fetch feed: {e}"
+            status.value = f"更新失敗：{e}"
             set_items([])
         finally:
             progress.visible = False
             page.update()
 
+    def crawl_all_feeds(_: ft.ControlEvent) -> None:
+        if not feeds:
+            return
+
+        # Disable buttons to prevent re-entry
+        btn_crawl_this.disabled = True
+        btn_crawl_all.disabled = True
+        progress.visible = True
+        status.value = f"開始更新全部訂閱... ({_now_text()})"
+        page.update()
+
+        def _task():
+            # Create a dedicated independent cache connection for this thread
+            # to avoid interference with the main thread's loop or SQLite lock issues
+            local_cache = CacheDB()
+            
+            count = len(feeds)
+            processed = 0
+            
+            for i, f in enumerate(feeds):
+                msg_prefix = f"[{i+1}/{count}] {f.title}"
+                status.value = f"{msg_prefix}: 正在更新..."
+                page.update()
+                
+                try:
+                    # We assume fetch_feed_items updates the DB side-effect
+                    fetch_feed_items(local_cache, f)
+                except Exception as e:
+                    print(f"Failed {f.title}: {e}")
+                
+                processed += 1
+            
+            local_cache.close()
+            
+            status.value = f"全部更新完成。共處理 {processed}/{count} 個訂閱源。 ({_now_text()})"
+            
+            # Refresh current view
+            show_cached_articles()
+            
+            # Re-enable buttons
+            btn_crawl_this.disabled = False
+            btn_crawl_all.disabled = False
+            progress.visible = False
+            page.update()
+
+        threading.Thread(target=_task, daemon=True).start()
+
+    # Toolbar Buttons
+    btn_edit = ft.ElevatedButton(text="編輯訂閱源", on_click=open_feed_editor)
+    btn_crawl_this = ft.ElevatedButton(text="更新此訂閱", on_click=lambda e: crawl_feed())
+    btn_crawl_all = ft.ElevatedButton(text="更新全部", on_click=crawl_all_feeds)
+
+    # Drawer for Mobile
+    drawer = ft.NavigationDrawer(controls=[])
+    page.drawer = drawer
+
+    def toggle_drawer(_):
+        page.open(drawer)
+
+    menu_button = ft.IconButton(ft.Icons.MENU, on_click=toggle_drawer, visible=False)
+
     toolbar = ft.Row(
         controls=[
-            ft.Text("yenslife-rss-feed", size=16, weight=ft.FontWeight.BOLD),
-            ft.Container(expand=True),
-            ft.ElevatedButton(text="Edit feed.toml", on_click=open_feed_editor),
-            ft.ElevatedButton(text="爬取 feed", on_click=lambda e: crawl_feed()),
+            menu_button,
+            ft.Container(
+                expand=True, # Push buttons to the right
+            ),
+            ft.Row(
+                controls=[
+                    btn_edit,
+                    btn_crawl_this,
+                    btn_crawl_all,
+                ],
+                alignment=ft.MainAxisAlignment.END,
+            ),
         ],
-        alignment=ft.MainAxisAlignment.START,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
+
+    feeds_col = ft.Column(
+        controls=[
+            ft.Text("訂閱列表", weight=ft.FontWeight.BOLD),
+            feed_list,
+        ],
+        expand=True,
+    )
+
+    feeds_panel = ft.Container(
+        content=feeds_col,
+        expand=True,
+        padding=8,
+        border=ft.border.all(1, outline_color),
+        border_radius=8,
+    )
+
+    items_panel = ft.Container(
+        expand=True,
+        content=ft.Column(
+            controls=[
+                ft.ResponsiveRow(
+                    controls=[
+                        ft.Container(
+                            content=ft.Text("文章列表", weight=ft.FontWeight.BOLD),
+                            col={"xs": 12, "sm": 3, "md": 2},
+                            alignment=ft.alignment.center_left,
+                            padding=ft.padding.only(top=5),
+                        ),
+                        ft.Container(
+                            content=search_field, col={"xs": 12, "sm": 9, "md": 10}
+                        ),
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                item_list,
+            ],
+            expand=True,
+        ),
+        padding=8,
+        border=ft.border.all(1, outline_color),
+        border_radius=8,
+    )
+
+    content_container = ft.Container(expand=True)
+    current_layout_mode = None
+    resize_subscriptions = []
+
+    def apply_responsive_sizing() -> None:
+        nonlocal current_layout_mode
+        width = page.width or 0
+
+        # Smart RWD Strategy:
+        # < 950px: Mobile Mode. Use Drawer for Feeds to maximize content area.
+        # >= 950px: Desktop Mode. Use Fixed Sidebar for Feeds (stable readability).
+        if width < 950:
+            mode = "mobile"
+        else:
+            mode = "desktop"
+
+        if mode == current_layout_mode:
+            return
+
+        current_layout_mode = mode
+
+        # Helper to ensure feed_list is in the right place
+        def reparent_feed_list(target_controls_list):
+            # Remove from everywhere else
+            if feed_list in drawer.controls:
+                drawer.controls.remove(feed_list)
+            if feed_list in feeds_col.controls:
+                feeds_col.controls.remove(feed_list)
+            
+            # Add to target
+            if feed_list not in target_controls_list:
+                target_controls_list.append(feed_list)
+
+        if mode == "mobile":
+            # Mobile View: Sidebar hidden, Feeds in Drawer
+            menu_button.visible = True
+            
+            # Setup Drawer Content
+            drawer.controls.clear()
+            drawer.controls.extend([
+                ft.Container(
+                    content=ft.Text("訂閱列表", size=20, weight=ft.FontWeight.BOLD),
+                    padding=ft.padding.only(left=20, top=20, bottom=10)
+                ),
+                ft.Divider(),
+                feed_list # This implicitly reparents in Flet runtime usually, but we manage it explicitly generally
+            ])
+            
+            # Explicit Reparenting logic to be safe
+            if feed_list in feeds_col.controls:
+                feeds_col.controls.remove(feed_list)
+            
+            feed_list.expand = True 
+            
+            # Main layout only shows items
+            content_container.content = items_panel
+        
+        else:
+            # Desktop View: Fixed Sidebar
+            menu_button.visible = False
+            
+            # Move feed_list back to sidebar
+            if feed_list in drawer.controls:
+                drawer.controls.remove(feed_list)
+            if feed_list not in feeds_col.controls:
+                feeds_col.controls.append(feed_list)
+
+            feed_list.expand = True
+
+            # Use Fixed Width for Sidebar on Desktop
+            # This prevents the "squashed" look on intermediate screen sizes
+            feeds_panel.width = 300
+            feeds_panel.expand = False
+            
+            items_panel.width = None
+            items_panel.expand = True
+            
+            content_container.content = ft.Row(
+                controls=[feeds_panel, items_panel],
+                expand=True,
+                spacing=10,
+            )
+
+        page.update()
 
     layout = ft.Column(
         controls=[
             toolbar,
             progress,
             ft.Divider(height=1),
-            ft.Row(
-                controls=[
-                    ft.Container(
-                        width=360,
-                        content=ft.Column(
-                            controls=[
-                                ft.Text("Feeds", weight=ft.FontWeight.BOLD),
-                                feed_list,
-                            ],
-                            expand=True,
-                        ),
-                        padding=8,
-                        border=ft.border.all(1, outline_color),
-                        border_radius=8,
-                    ),
-                    ft.Container(
-                        expand=True,
-                        content=ft.Column(
-                            controls=[
-                                ft.Row(
-                                    controls=[
-                                        ft.Text("Items", weight=ft.FontWeight.BOLD),
-                                        ft.Container(expand=True),
-                                        search_field,
-                                    ],
-                                ),
-                                item_list,
-                            ],
-                            expand=True,
-                        ),
-                        padding=8,
-                        border=ft.border.all(1, outline_color),
-                        border_radius=8,
-                    ),
-                ],
-                expand=True,
-            ),
+            content_container,
             ft.Divider(height=1),
             status,
         ],
         expand=True,
     )
 
-    page.add(layout)
+    # Wrap layout in SafeArea to avoid system UI overlap on mobile
+    safe_layout = ft.SafeArea(layout, expand=True)
+
+    page.add(safe_layout)
+
+    def on_resize_handler(e):
+        apply_responsive_sizing()
+        for sub in list(resize_subscriptions):  # Copy list to safe iterate
+            try:
+                sub(e)
+            except Exception:
+                pass
+
+    page.on_resize = on_resize_handler
+    apply_responsive_sizing()
     load_subscriptions()
     show_cached_articles()
 

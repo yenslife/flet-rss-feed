@@ -418,7 +418,7 @@ def entry_item_id(entry: Any) -> str:
 
 def fetch_feed_items(cache: CacheDB, feed: FeedConfig) -> tuple[list[FeedItem], str]:
     etag, last_modified = cache.get_feed_meta(feed.id)
-    headers: dict[str, str] = {"User-Agent": "yenslife-rss-feed/0.1"}
+    headers: dict[str, str] = {"User-Agent": "flet-rss-feed/0.1"}
     if etag:
         headers["If-None-Match"] = etag
     if last_modified:
