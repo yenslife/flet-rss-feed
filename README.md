@@ -78,8 +78,6 @@ App 會把 feed 的 metadata 與文章列表快取到資料庫裡，重新整理
  FEED_TOML="https://raw.githubusercontent.com/<owner>/<repo>/<branch>/feed.toml" uv run main.py
  ```
  
- ## 在 App 內編輯 feed.toml
- 
 ## 在 App 內編輯 feed.toml
  
  工具列有 `編輯訂閱源` 按鈕，可直接在 App 內修改 TOML。
